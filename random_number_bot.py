@@ -6,50 +6,17 @@
 import praw
 import re
 import time
-import configparser
 import logging
 import os
 import smtplib
 import json
 import requests
 import uuid
-
-from email.mime.text import MIMEText
-
 # =============================================================================
 # GLOBALS
 # =============================================================================
 
 VERSION = '1.1.3'
-
-# Reads the config file
-config = configparser.ConfigParser()
-config.read("random_number_bot.cfg")
-
-bot_username = config.get("Reddit", "username")
-bot_password = config.get("Reddit", "password")
-client_id = config.get("Reddit", "client_id")
-client_secret = config.get("Reddit", "client_secret")
-
-#Reddit info
-reddit = praw.Reddit(client_id=client_id,
-                     client_secret=client_secret,
-                     password=bot_password,
-                     user_agent='random_number_bot by /u/BoyAndHisBlob',
-                     username=bot_username)
-
-EMAIL_SERVER = config.get("Email", "server")
-EMAIL_USERNAME = config.get("Email", "username")
-EMAIL_PASSWORD = config.get("Email", "password")
-
-DEV_EMAIL = config.get("RandomNumberBot", "dev_email")
-
-RUNNING_FILE = "random_number_bot.running"
-ENVIRONMENT = config.get("RandomNumberBot", "environment")
-DEV_USER_NAME = config.get("RandomNumberBot", "dev_user")
-RANDOM_ORG_API_KEY = config.get("RandomNumberBot", "random_org_api_key")
-RANDOM_ORG_API_URL = 'https://api.random.org/json-rpc/1/invoke'
-HTTP_TIMEOUT = 30.0
 
 FORMAT = '%(asctime)-15s %(message)s'
 logging.basicConfig(format=FORMAT)
@@ -57,7 +24,7 @@ logger = logging.getLogger('RandomNumberBot')
 logger.setLevel(logging.INFO)
 
 random_number_reply = """#{command_message} {random_numbers}
-        
+
 Paste the following values into their respective fields on the [random.org verify page](https://api.random.org/verify) to verify the winner.
 
 **Random:**
@@ -68,44 +35,32 @@ Paste the following values into their respective fields on the [random.org verif
 
 {verification_signature}
 
-**This bot is maintained and hosted by BoyAndHisBlob. View the {version} source code on [github](https://github.com/jjmerri/random-number-bot)**"""
+**This bot is maintained and hosted by {dev_name}. View the {version} source code on [github](https://github.com/ComplexImpedance/random-number-bot)**"""
 
 
-def send_dev_pm(subject, body):
+def send_dev_pm(reddit, user_name, subject, body):
     """
     Sends Reddit PM to DEV_USER_NAME
     :param subject: subject of PM
     :param body: body of PM
     """
-    reddit.redditor(DEV_USER_NAME).message(subject, body)
+    reddit.redditor(user_name).message(subject, body)
 
-def send_dev_email(subject, body, email_addresses):
-    sent_from = DEV_EMAIL
-
-    msg = MIMEText(body.encode('utf-8'), 'plain', 'UTF-8')
-    msg['Subject'] = subject
-
-    server = smtplib.SMTP_SSL(EMAIL_SERVER, 465)
-    server.ehlo()
-    server.login(EMAIL_USERNAME, EMAIL_PASSWORD)
-    server.sendmail(sent_from, email_addresses, msg.as_string())
-    server.close()
-
-def create_running_file():
-    running_file = open(RUNNING_FILE, "w")
-    running_file.write(str(os.getpid()))
-    running_file.close()
-
-def check_mentions():
+def check_mentions(reddit, bot_username, dev_name, api_key, api_url):
     for mention in reddit.inbox.unread(limit=None):
-        # Mark Read first in case there is an error we dont want to keep trying to process it
+        #Mark Read first in case there is an error we dont want to keep trying to process it
         mention.mark_read()
-        process_mention(mention)
+        process_mention(mention, bot_username, dev_name, api_key, api_url)
+        #break after first item so we don't go over timeout
+        break
 
-def process_mention(mention):
-    logger.info(
-        'Processing comment by {author} for {context}'.format(author=str(mention.author), context=mention.context))
+def getRdoRequest(num_randoms, num_slots, api_key):
+    return {'jsonrpc': '2.0', 'method': 'generateSignedIntegers',
+    'params': {'apiKey': api_key, 'n': num_randoms, 'min': 1, 'max': num_slots, 'replacement': False},
+    'id': uuid.uuid4().hex}
 
+
+def process_mention(mention, bot_username, dev_name, api_key, api_url):
     command_regex = r'^([ ]+)?/?u/{bot_username}[ ]+(?P<param_1>[\d]+)([ ]+(?P<param_2>[\d]+))?([ ]+)?$'.format(bot_username=bot_username)
     match = re.search(command_regex, mention.body, re.IGNORECASE)
 
@@ -127,47 +82,38 @@ def process_mention(mention):
         #could be a normal mention not a command so just return
         return
 
-    request = getRdoRequest(num_randoms, num_slots)
+    #response = random_org_client.generate_signed_integers(num_randoms, 1, num_slots, replacement=False)
+    request = getRdoRequest(num_randoms, num_slots, api_key)
 
     responseData = {}
     try:
-        response = requests.post(RANDOM_ORG_API_URL,
-                      data=json.dumps(request),
-                      headers={'content-type': 'application/json'},
-                      timeout=HTTP_TIMEOUT)
+        HTTP_TIMEOUT = 3.0
+        response = requests.post(api_url,
+                data=json.dumps(request),
+                headers={'content-type': 'application/json'},
+                timeout=HTTP_TIMEOUT)
         responseData = response.json()
 
-        logger.info('API response for comment by {author} for {context} is {response}'
-                    .format(author=str(mention.author), context=mention.context, response=str(responseData)))
+
     except Exception as err:
         logger.exception('Error calling RandomOrg API')
 
     if(responseData and 'result' in responseData):
         responseResult = responseData['result']
         mention.reply(random_number_reply.format(command_message = command_message,
-                                   random_numbers = str(responseResult['random']['data']),
-                                   verification_random = get_verification_random(responseResult['random']),
-                                   verification_signature = str(responseResult['signature']),
-                                   version = VERSION))
+                                    random_numbers = str(responseResult['random']['data']),
+                                    verification_random = get_verification_random(responseResult['random']),
+                                    verification_signature = str(responseResult['signature']),
+                                    version = VERSION,
+                                    dev_name = dev_name))
     else:
         logger.error('Error getting random nums {num_randoms} {num_slots}'.format(num_randoms=num_randoms, num_slots=num_slots))
-        logger.error(str(responseData))
+        logger.error(str(response))
         try:
-            if num_slots == 1:
-                mention.reply('The number of slots must be greater than 1. Please fix the call and try again.')
-            else:
-                mention.reply('There was an error getting your random numbers from random.org. Please try again. '
-                              'If you continue to experience issues or the bot becomes unresponsive please contact {DEV_USER_NAME}.'
-                              .format(DEV_USER_NAME=DEV_USER_NAME))
-                send_dev_email("Error getting random nums", 'Error getting random nums {num_randoms} {num_slots}'.format(num_randoms=num_randoms, num_slots=num_slots), [DEV_EMAIL])
-                send_dev_pm("Error getting random nums", 'Error getting random nums {num_randoms} {num_slots}'.format(num_randoms=num_randoms, num_slots=num_slots))
+            mention.reply('There was an error getting your random numbers from random.org. Please try again.')
+            send_dev_pm(reddit, dev_name, "Error getting random nums", 'Error getting random nums {num_randoms} {num_slots}'.format(num_randoms=num_randoms, num_slots=num_slots))
         except Exception as err:
-            logger.exception("Unknown error sending dev pm or email")
-
-def getRdoRequest(num_randoms, num_slots):
-    return {'jsonrpc': '2.0', 'method': 'generateSignedIntegers',
-     'params': {'apiKey': RANDOM_ORG_API_KEY, 'n': num_randoms, 'min': 1, 'max': num_slots, 'replacement': False},
-     'id': uuid.uuid4().hex}
+            logger.exception("Unknown error sending dev pm")
 
 def get_verification_random(random_dict):
     return '{{"method": "generateSignedIntegers",'\
@@ -195,41 +141,36 @@ def get_verification_random(random_dict):
 # MAIN
 # =============================================================================
 
-def main():
-    logger.info("start")
+def call_the_bot(event, context):
+    #get env variables
+    try:
+        bot_username = os.environ["username"]
+        bot_password = os.environ["password"]
+        client_id = os.environ["client_id"]
+        client_secret = os.environ["client_secret"]
 
-    start_process = False
+        DEV_USER_NAME = os.environ["dev_user"]
+        RANDOM_ORG_API_KEY = os.environ["random_org_api_key"]
+        RANDOM_ORG_API_URL = 'https://api.random.org/json-rpc/1/invoke'
 
-    if ENVIRONMENT == "DEV" and os.path.isfile(RUNNING_FILE):
-        os.remove(RUNNING_FILE)
-        logger.info("running file removed")
+    except KeyError:
+        return "Please set the environment variables"
 
-    if not os.path.isfile(RUNNING_FILE):
-        create_running_file()
-        start_process = True
-    else:
-        start_process = False
-        logger.error("reddit post notifier already running! Will not start.")
 
-    while start_process and os.path.isfile(RUNNING_FILE):
-        logger.info("Start Main Loop")
+    #Reddit info
+    reddit = praw.Reddit(client_id=client_id,
+                        client_secret=client_secret,
+                        password=bot_password,
+                        user_agent='random_number_bot by /u/BoyAndHisBlob',
+                        username=bot_username)
+    #random_org_client = RandomOrgClient(RANDOM_ORG_API_KEY, blocking_timeout=3.0, http_timeout=3.0)
+
+    try:
+        check_mentions(reddit, bot_username, DEV_USER_NAME, RANDOM_ORG_API_KEY, RANDOM_ORG_API_URL)
+    except Exception as err:
+        logger.exception("Unknown Exception in check_mentions")
         try:
-            check_mentions()
-            logger.info("End Main Loop")
+            send_dev_pm(reddit, "Unknown Exception in Main Loop", "Error: {exception}".format(exception = str(err)))
         except Exception as err:
-            logger.exception("Unknown Exception in Main Loop")
-            try:
-                send_dev_email("Unknown Exception in Main Loop", "Error: {exception}".format(exception = str(err)), [DEV_EMAIL])
-                send_dev_pm("Unknown Exception in Main Loop", "Error: {exception}".format(exception = str(err)))
-            except Exception as err:
-                logger.exception("Unknown error sending dev pm or email")
-        time.sleep(300)
-
-    logger.info("end")
-
-# =============================================================================
-# RUNNER
-# =============================================================================
-
-if __name__ == '__main__':
-    main()
+            logger.exception("Unknown error sending dev pm")
+    return "fin"
