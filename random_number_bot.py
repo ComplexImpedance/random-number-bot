@@ -40,17 +40,19 @@ Paste the following values into their respective fields on the [random.org verif
 
 def send_dev_pm(reddit, user_name, subject, body):
     """
-    Sends Reddit PM to DEV_USER_NAME
+    Sends Reddit PM to dev_user_name
     :param subject: subject of PM
     :param body: body of PM
     """
     reddit.redditor(user_name).message(subject, body)
 
-def check_mentions(reddit, bot_username, dev_name, api_key, api_url):
+def check_mentions(reddit, bot_username, dev_name, api_key, api_url, debug_mode):
     for mention in reddit.inbox.unread(limit=None):
         #Mark Read first in case there is an error we dont want to keep trying to process it
         mention.mark_read()
         process_mention(mention, bot_username, dev_name, api_key, api_url)
+        if debug_mode:
+            mention.mark_unread()
         #break after first item so we don't go over timeout
         break
 
@@ -61,8 +63,9 @@ def getRdoRequest(num_randoms, num_slots, api_key):
 
 
 def process_mention(mention, bot_username, dev_name, api_key, api_url):
+    logger.info('Processing comment by {author} for {context}'.format(author=str(mention.author), context=mention.context))
     command_regex = r'^([ ]+)?/?u/{bot_username}[ ]+(?P<param_1>[\d]+)([ ]+(?P<param_2>[\d]+))?([ ]+)?$'.format(bot_username=bot_username)
-    match = re.search(command_regex, mention.body, re.IGNORECASE)
+    match = re.search(command_regex, mention.body.strip(), re.IGNORECASE)
 
     command_message = ''
     num_randoms = 0
@@ -87,13 +90,13 @@ def process_mention(mention, bot_username, dev_name, api_key, api_url):
 
     responseData = {}
     try:
-        HTTP_TIMEOUT = 3.0
+        HTTP_TIMEOUT = 30.0
         response = requests.post(api_url,
                 data=json.dumps(request),
                 headers={'content-type': 'application/json'},
                 timeout=HTTP_TIMEOUT)
         responseData = response.json()
-
+        logger.info('API response for comment by {author} for {context} is {response}'.format(author=str(mention.author), context=mention.context, response=str(responseData)))
 
     except Exception as err:
         logger.exception('Error calling RandomOrg API')
@@ -106,6 +109,9 @@ def process_mention(mention, bot_username, dev_name, api_key, api_url):
                                     verification_signature = str(responseResult['signature']),
                                     version = VERSION,
                                     dev_name = dev_name))
+
+        logger.info('Reddit reply response for comment by {author} for {context}'.format(author=str(mention.author), context=mention.context))
+
     else:
         logger.error('Error getting random nums {num_randoms} {num_slots}'.format(num_randoms=num_randoms, num_slots=num_slots))
         logger.error(str(response))
@@ -143,18 +149,27 @@ def get_verification_random(random_dict):
 
 def call_the_bot(event, context):
     #get env variables
+    logger.info("call_the_bot started")
+
     try:
         bot_username = os.environ["username"]
         bot_password = os.environ["password"]
         client_id = os.environ["client_id"]
         client_secret = os.environ["client_secret"]
 
-        DEV_USER_NAME = os.environ["dev_user"]
-        RANDOM_ORG_API_KEY = os.environ["random_org_api_key"]
-        RANDOM_ORG_API_URL = 'https://api.random.org/json-rpc/1/invoke'
+        dev_user_name = os.environ["dev_user"]
+        random_org_api_key = os.environ["random_org_api_key"]
+        random_org_api_url = 'https://api.random.org/json-rpc/1/invoke'
 
     except KeyError:
         return "Please set the environment variables"
+
+    #debug flag, if set to anything then turn on
+    #debug mode is for usage, will not mark messages as read
+    if os.environ.get('BOT_DEBUG') is None:
+        debug_mode = False
+    else:
+        debug_mode = True
 
 
     #Reddit info
@@ -166,11 +181,12 @@ def call_the_bot(event, context):
     #random_org_client = RandomOrgClient(RANDOM_ORG_API_KEY, blocking_timeout=3.0, http_timeout=3.0)
 
     try:
-        check_mentions(reddit, bot_username, DEV_USER_NAME, RANDOM_ORG_API_KEY, RANDOM_ORG_API_URL)
+        check_mentions(reddit, bot_username, dev_user_name, random_org_api_key, random_org_api_url, debug_mode)
     except Exception as err:
         logger.exception("Unknown Exception in check_mentions")
         try:
             send_dev_pm(reddit, "Unknown Exception in Main Loop", "Error: {exception}".format(exception = str(err)))
         except Exception as err:
             logger.exception("Unknown error sending dev pm")
+    logger.info("call_the_bot ended")
     return "fin"
